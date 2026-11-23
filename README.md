@@ -14,6 +14,7 @@ A focused **full-stack financial transaction aggregation** project built with **
 | `customer-service` | Demo customer identity/reference data for scoping financial records |
 | `account-service` | Account metadata and account-to-customer ownership checks |
 | `transaction-service` | Demo first-party transaction creation; publishes Kafka events imported by the aggregator |
+| `case-service` | Cases opened against customers, accounts or transactions, with activity history and status workflow |
 | `api-gateway` | Single entry point for APIs and a **demo-only** JWT session endpoint |
 | `frontend` | React dashboard for customer/account setup, mock imports, summaries, category analysis, trends, filtering and pagination |
 | `postgres`, `kafka`, `db-init` | Persistent databases, Apache Kafka KRaft broker and idempotent database initialization |
@@ -156,7 +157,7 @@ curl -sS "http://localhost:8000/api/v1/aggregation/accounts/$ACCOUNT_ID/summary"
 Java unit tests are located beside each service under `src/test`. From the repository root:
 
 ```bash
-for service in customer-service account-service transaction-service aggregation-service api-gateway; do
+for service in customer-service account-service transaction-service case-service aggregation-service api-gateway; do
   (cd "$service" && mvn -B test) || exit 1
 done
 ```

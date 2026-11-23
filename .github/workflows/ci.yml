@@ -18,6 +18,7 @@ jobs:
           - customer-service
           - account-service
           - transaction-service
+          - case-service
           - aggregation-service
           - api-gateway
     steps:
