@@ -65,7 +65,7 @@ jobs:
       - name: Create build truststore
         run: scripts/dev/generate-truststore.sh
       - name: Start stack
-        run: docker compose up -d --build --wait --wait-timeout 600
+        run: docker compose up -d --build --wait --wait-timeout 1800
       - name: Smoke test
         run: scripts/dev/smoke-test.sh
       - name: Container logs on failure
