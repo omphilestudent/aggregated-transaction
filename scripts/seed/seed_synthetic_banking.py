@@ -235,20 +235,32 @@ def ensure_customers(summary):
             if customer_spec(i)["email"] in by_email]
 
 
+TYPE_ORDER = {"SAVINGS": 0, "CHEQUE": 1}
+
+
+def accounts_of(customer_id: str) -> list:
+    """The customer's accounts in a fixed order (savings first, then cheque). Order by type, not by the
+    random account number, so the same account always gets the same role on every run."""
+    return sorted(items(must_get(f"/accounts/customer/{customer_id}")),
+                  key=lambda a: TYPE_ORDER.get(a.get("accountType"), 99))
+
+
 def ensure_accounts(index: int, customer: dict, summary) -> list:
-    accounts = items(must_get(f"/accounts/customer/{customer['id']}"))
-    have = {a.get("accountType") for a in accounts}
+    """Creates each wanted account type exactly once. A failed or ambiguous create is not retried
+    blindly: the account list is read again first, so an account that was in fact created is kept."""
     wanted = ["SAVINGS"] + (["CHEQUE"] if index % 3 != 0 else [])
     for account_type in wanted:
-        if account_type in have:
+        have = [a for a in accounts_of(customer["id"]) if a.get("accountType") == account_type]
+        if have:
             continue
         status, created = call("POST", "/accounts", {"customerId": customer["id"], "accountType": account_type})
         if status == 201:
-            accounts.append(created)
             summary["accounts_created"] += 1
-        else:
-            summary["failures"].append(f"open {account_type} for {customer['email']}: {status} {created}")
-    return sorted(accounts, key=lambda a: (a.get("accountType") != "SAVINGS", a.get("accountNumber", "")))
+            continue
+        # Ambiguous or failed: check whether it exists before deciding anything.
+        if not [a for a in accounts_of(customer["id"]) if a.get("accountType") == account_type]:
+            raise SeedError(f"open {account_type} for {customer['email']} failed: {status} {created}")
+    return accounts_of(customer["id"])
 
 
 def seed_customer(index: int, customer: dict, now: datetime) -> dict:
@@ -270,19 +282,20 @@ def seed_customer(index: int, customer: dict, now: datetime) -> dict:
     plan = plan_transactions(code, now, len(accounts))
 
     for ai, account in enumerate(accounts):
+        role = account.get("accountType")
         try:
             existing = len(items(must_get(f"/transactions/account/{account['id']}")))
         except SeedError as error:
-            local["failures"].append(f"{code}-A{ai}: {error}")
+            local["failures"].append(f"{code}-{role}: {error}")
             continue
         if existing == 0:
-            rng = random.Random(f"open-{code}-{ai}")
+            rng = random.Random(f"open-{code}-{role}")
             status, body = call("POST", "/transactions/funding", {
                 "accountId": account["id"], "entryKind": "OPENING_BALANCE",
                 "amount": f"{rng.randint(15, 90) * 1000}.00", "currency": CURRENCY,
-                "idempotencyKey": f"seed-{code}-A{ai}-OPEN", "description": "Opening balance"})
+                "idempotencyKey": f"seed-{code}-{role}-OPEN", "description": "Opening balance"})
             if status not in (200, 201):
-                local["failures"].append(f"opening balance {code}-A{ai}: {status} {body}")
+                local["failures"].append(f"opening balance {code}-{role}: {status} {body}")
                 continue
             local["funding_created"] += 1
             existing = 1
@@ -307,6 +320,33 @@ def seed_customer(index: int, customer: dict, now: datetime) -> dict:
                 else:
                     local["failures"].append(f"post {entry['ref']}: {status} {posted_body}")
     return local
+
+
+def verify_ledger(customers, summary):
+    """Rules checked after seeding: one account per type per customer, and every account has
+    transactions and a positive balance."""
+    for customer in customers:
+        try:
+            accounts = accounts_of(customer["id"])
+        except SeedError as error:
+            summary["failures"].append(f"verify {customer['email']}: {error}")
+            continue
+        types = [a.get("accountType") for a in accounts]
+        if len(types) != len(set(types)):
+            summary["failures"].append(f"duplicate account types for {customer['email']}: {types}")
+        for account in accounts:
+            try:
+                transactions = items(must_get(f"/transactions/account/{account['id']}"))
+                balance = must_get(f"/transactions/account/{account['id']}/balance")
+            except SeedError as error:
+                summary["failures"].append(f"verify {account['id']}: {error}")
+                continue
+            if not transactions:
+                summary["failures"].append(f"{customer['email']} {account.get('accountType')} has no transactions")
+            elif float(balance.get("balance", 0)) <= 0:
+                summary["failures"].append(f"{customer['email']} {account.get('accountType')} has a zero balance")
+            else:
+                summary["accounts_verified"] += 1
 
 
 def customer_token(customer_id: str):
@@ -424,7 +464,7 @@ def main() -> int:
         "funding_created": 0, "transactions_created": 0, "transactions_existing": 0,
         "posted": 0, "imports": 0, "imported_rows_received": 0, "imported_rows_counted": 0,
         "imported_rows_already_present": 0, "balances_checked": 0, "summaries_checked": 0,
-        "kafka_rows_seen": 0, "cases_created": 0, "cases_existing": 0, "failures": [],
+        "kafka_rows_seen": 0, "cases_created": 0, "cases_existing": 0, "accounts_verified": 0, "failures": [],
     }
 
     print(f"seed: ensuring {CUSTOMER_COUNT} customers", flush=True)
@@ -450,6 +490,7 @@ def main() -> int:
                 print(f"seed: {done}/{len(customers)} customers processed", flush=True)
 
     check_balances(accounts_by_customer, summary)
+    verify_ledger(customers, summary)
 
     print("seed: importing through aggregation-service", flush=True)
     import_jobs = []

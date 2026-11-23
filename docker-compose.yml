@@ -325,6 +325,7 @@ services:
   seeder:
     image: python:3.12-alpine
     restart: "no"
+    profiles: ["seed"]
     working_dir: /seed
     command: ["python3", "/seed/seed_synthetic_banking.py"]
     environment:
