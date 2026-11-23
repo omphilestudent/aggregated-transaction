@@ -64,7 +64,10 @@ docker run --rm -v "$WORK:/work" eclipse-temurin:21-jre-alpine sh -c '
 '
 
 mkdir -p "$OUT_DIR"
-mv "$WORK/truststore.jks" "$OUT_ABS"
+# Copy rather than move: the file was written by root inside the container, and only a copy made by
+# this user is owned by this user, so the chmod below works on CI runners and Docker Desktop alike.
+rm -f "$OUT_ABS"
+cp "$WORK/truststore.jks" "$OUT_ABS"
 chmod 600 "$OUT_ABS"
 
 echo "Truststore written: $OUT_ABS"

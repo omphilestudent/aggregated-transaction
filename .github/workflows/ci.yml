@@ -56,14 +56,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Create build truststore
-        run: scripts/dev/generate-truststore.sh
       - name: Create .env with generated secrets
         run: |
           cp .env.example .env
           DB_PW="$(openssl rand -hex 16)"
           sed -i "s/replace-with-local-db-password/${DB_PW}/g" .env
           sed -i "s/replace-with-32-plus-random-bytes/$(openssl rand -hex 32)/" .env
+      - name: Create build truststore
+        run: scripts/dev/generate-truststore.sh
       - name: Start stack
         run: docker compose up -d --build --wait --wait-timeout 600
       - name: Smoke test
