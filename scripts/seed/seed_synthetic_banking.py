@@ -7,27 +7,24 @@ paths the frontend and the README use. It can also run on the host:
 
     GATEWAY_URL=http://localhost:8000/api/v1 python3 scripts/seed/seed_synthetic_banking.py
 
-What it ensures exist (all data is synthetic; e-mail addresses use the reserved example.com domain):
+What it ensures exist (e-mail addresses use the reserved example.com domain):
 
-  * SEED_CUSTOMER_COUNT customers (default 60); every tenth is a BUSINESS client
-  * a SAVINGS account for each customer, plus a CHEQUE account for two thirds of them
+  * SEED_CUSTOMER_COUNT customers (default 60); every tenth is a business client
+  * a savings account for each customer, plus a cheque account for two thirds of them
   * an opening balance on each account (ledger funding endpoint)
   * about 110 ledger transactions per customer over the last ~15 months (salary, card, grocery,
     fuel, utilities, ATM, loan repayments). Credits are posted, so balances move.
-  * a deterministic burst of small card purchases per customer, posted against the savings account
+  * CASE_COUNT customer cases in case-service, one for each of the first ten customers
   * an aggregation import per account (BANK_FEED, CARD_NETWORK or OPEN_BANKING, rotated by customer),
     made with the customer's own session token, as the frontend does
-  * CASE_COUNT cases in case-service (SEED-CASE-01 .. SEED-CASE-10), one for each of the first ten
-    customers, linked to that customer's savings account
-  * checks: every balance is readable, every import returns rows, and the transaction events that
-    the ledger publishes over Kafka reach the aggregation service (polled for a bounded time)
+  * checks: every balance is readable, every import returns rows, the summaries are non-zero, and the
+    ledger events that the ledger publishes over Kafka reach the aggregation service
 
-Idempotency: every seeded ledger transaction description starts with "SEED <ref> ", where the ref
-is stable (for example "C007-R012"). A run reads the refs already present on each account and only
-creates the missing ones, so repeated runs and runs after a partial failure never duplicate ledger
-data. Aggregation imports are keyed by seed and date window, and the platform itself skips rows it
-has already counted. Customers and accounts are matched by e-mail and account type. Nothing
-existing is modified.
+Idempotency: funding is keyed by a stable idempotency key. Routine transactions are created in a
+fixed order per account, so a re-run counts the transactions already present and creates only the
+rest. This also finishes a run that stopped part way. Cases are matched by customer and subject.
+Aggregation imports are keyed by seed and date window, and the platform skips rows it has already
+counted. Nothing existing is modified.
 
 Environment:
   GATEWAY_URL                  default http://localhost:8000/api/v1
@@ -53,12 +50,11 @@ CUSTOMER_COUNT = max(1, int(os.environ.get("SEED_CUSTOMER_COUNT", "60")))
 INGEST_WAIT_SECONDS = int(os.environ.get("SEED_INGEST_WAIT_SECONDS", "120"))
 ROUTINE_TXN_PER_CUSTOMER = 102
 CASE_COUNT = 10
-CASE_PREFIX = "SEED-CASE"
 CASE_SUBJECTS = [
-    "Disputed card purchase", "Duplicate debit order", "Unexpected fuel charge",
+    "Disputed card transaction", "Duplicate debit order", "Unexpected fuel charge",
     "Salary deposit not received", "ATM withdrawal not dispensed", "Loan repayment query",
-    "Utilities payment reversal", "EFT transfer on hold", "Account statement request",
-    "Address change for statements",
+    "Utilities payment reversal request", "Transfer on hold", "Statement request",
+    "Change of contact details",
 ]
 CASE_PRIORITIES = ["LOW", "MEDIUM", "HIGH", "CRITICAL"]
 IMPORT_COUNT = 60
@@ -150,8 +146,8 @@ def customer_spec(index: int) -> dict:
     last = LAST_NAMES[(index * 7 + index // len(LAST_NAMES)) % len(LAST_NAMES)]
     if index % 10 == 9:
         return {
-            "firstName": f"{last.split()[-1]} Logistics {index:03d}"[:100],
-            "lastName": "Pty Ltd",
+            "firstName": f"{last} Trading",
+            "lastName": "(Pty) Ltd",
             "email": f"accounts.{index:03d}@{EMAIL_DOMAIN}",
             "phoneNumber": f"+2711{index:07d}",
             "clientType": "BUSINESS",
@@ -170,13 +166,6 @@ def money(rng: random.Random, low: int, high: int) -> str:
     return f"{rng.randint(low * 100, high * 100) / 100:.2f}"
 
 
-def ref_of(description):
-    """'SEED C007-R012 Card purchase' -> 'C007-R012'; anything else -> None."""
-    if description and description.startswith("SEED ") and len(description.split()) >= 2:
-        return description.split()[1]
-    return None
-
-
 def plan_transactions(code: str, now: datetime, account_count: int):
     """Deterministic plan for one customer. The same customer always gets the same plan.
     Only credits are posted; debits stay pending, so the ledger never overdraws in the seed."""
@@ -193,14 +182,14 @@ def plan_transactions(code: str, now: datetime, account_count: int):
         plan.append({
             "ref": f"{code}-HV{k}", "account": 0, "type": "DEBIT", "amount": "60000.00",
             "when": now - timedelta(days=rng.uniform(5, 450)),
-            "name": "High-value transfer review", "post": False,
+            "name": "Online transfer", "post": False,
         })
     burst_start = now - timedelta(days=rng.uniform(20, 400))
     for k in range(6):
         plan.append({
             "ref": f"{code}-BU{k}", "account": 0, "type": "DEBIT", "amount": "45.00",
             "when": burst_start + timedelta(seconds=40 * k),
-            "name": "Rapid card purchase", "post": True,
+            "name": "Card purchase", "post": True,
         })
     for entry in plan:
         if entry["when"] > now:
@@ -253,7 +242,10 @@ def ensure_accounts(index: int, customer: dict, summary) -> list:
 
 
 def seed_customer(index: int, customer: dict, now: datetime) -> dict:
-    """Seeds one customer's accounts and ledger. Runs in a worker thread; returns its own counters."""
+    """Seeds one customer's accounts and ledger. Runs in a worker thread; returns its own counters.
+
+    Per account, the planned transactions are created in a fixed order. The transactions already on
+    the account are counted first, so only the missing ones are created. Nothing is tagged or renamed."""
     local = {"accounts_created": 0, "transactions_created": 0, "transactions_existing": 0,
              "funding_created": 0, "posted": 0, "failures": [], "accounts": []}
     code = f"C{index:03d}"
@@ -261,53 +253,45 @@ def seed_customer(index: int, customer: dict, now: datetime) -> dict:
     local["accounts"] = [a["id"] for a in accounts]
     if not accounts:
         return local
-    existing = {}
-    for account in accounts:
-        status, txns = call("GET", f"/transactions/account/{account['id']}")
-        refs = set()
-        for t in items(txns) if status == 200 else []:
-            ref = ref_of(t.get("description"))
-            if ref:
-                refs.add(ref)
-        existing[account["id"]] = refs
+    plan = plan_transactions(code, now, len(accounts))
 
-    # Opening balance on each account: idempotent by its own reference and idempotency key.
     for ai, account in enumerate(accounts):
-        ref = f"{code}-A{ai}-OPEN"
-        if ref in existing[account["id"]]:
-            local["transactions_existing"] += 1
+        status, txns = call("GET", f"/transactions/account/{account['id']}")
+        if status != 200:
+            local["failures"].append(f"list transactions for {account['id']}: {status}")
             continue
-        rng = random.Random(f"open-{code}-{ai}")
-        status, body = call("POST", "/transactions/funding", {
-            "accountId": account["id"], "entryKind": "OPENING_BALANCE",
-            "amount": f"{rng.randint(15, 90) * 1000}.00", "currency": CURRENCY,
-            "idempotencyKey": f"seed-{ref}", "description": f"SEED {ref} Opening balance"})
-        if status in (200, 201):
+        existing = len(items(txns))
+        if existing == 0:
+            rng = random.Random(f"open-{code}-{ai}")
+            status, body = call("POST", "/transactions/funding", {
+                "accountId": account["id"], "entryKind": "OPENING_BALANCE",
+                "amount": f"{rng.randint(15, 90) * 1000}.00", "currency": CURRENCY,
+                "idempotencyKey": f"seed-{code}-A{ai}-OPEN", "description": "Opening balance"})
+            if status not in (200, 201):
+                local["failures"].append(f"opening balance {code}-A{ai}: {status} {body}")
+                continue
             local["funding_created"] += 1
-        else:
-            local["failures"].append(f"opening balance {ref}: {status} {body}")
+            existing = 1
 
-    for entry in plan_transactions(code, now, len(accounts)):
-        account = accounts[entry["account"]]
-        if entry["ref"] in existing[account["id"]]:
-            local["transactions_existing"] += 1
-            continue
-        body = {
-            "accountId": account["id"], "type": entry["type"], "amount": entry["amount"],
-            "currency": CURRENCY, "description": f"SEED {entry['ref']} {entry['name']}",
-            "syntheticSeed": True, "occurredAt": entry["when"].strftime("%Y-%m-%dT%H:%M:%S"),
-        }
-        status, created = call("POST", "/transactions", body)
-        if status != 201:
-            local["failures"].append(f"transaction {entry['ref']}: {status} {created}")
-            continue
-        local["transactions_created"] += 1
-        if entry["post"]:
-            status, body = call("POST", f"/transactions/{created['id']}/post")
-            if status == 200:
-                local["posted"] += 1
-            else:
-                local["failures"].append(f"post {entry['ref']}: {status} {body}")
+        done = existing - 1
+        local["transactions_existing"] += existing
+        for entry in [e for e in plan if e["account"] == ai][done:]:
+            body = {
+                "accountId": account["id"], "type": entry["type"], "amount": entry["amount"],
+                "currency": CURRENCY, "description": entry["name"],
+                "syntheticSeed": True, "occurredAt": entry["when"].strftime("%Y-%m-%dT%H:%M:%S"),
+            }
+            status, created = call("POST", "/transactions", body)
+            if status != 201:
+                local["failures"].append(f"transaction {entry['ref']}: {status} {created}")
+                continue
+            local["transactions_created"] += 1
+            if entry["post"]:
+                status, posted_body = call("POST", f"/transactions/{created['id']}/post")
+                if status == 200:
+                    local["posted"] += 1
+                else:
+                    local["failures"].append(f"post {entry['ref']}: {status} {posted_body}")
     return local
 
 
@@ -343,34 +327,33 @@ def aggregation_import(index: int, customer: dict, account_id: str, account_offs
 
 # --------------------------------------------------------------------------- cases
 def seed_cases(customers, accounts_by_customer, summary):
-    """One case per customer for the first CASE_COUNT customers. Matched by subject, so re-runs add nothing."""
-    status, listing = call("GET", f"/cases?q={CASE_PREFIX}&size=200")
-    existing = {c.get("subject") for c in items(listing)} if status == 200 else set()
+    """One case per customer for the first CASE_COUNT customers. Matched by customer and subject,
+    so re-runs add nothing that already exists."""
     for i, customer in enumerate(customers[:CASE_COUNT]):
-        number = i + 1
-        subject = f"{CASE_PREFIX}-{number:02d} {CASE_SUBJECTS[i % len(CASE_SUBJECTS)]}"
+        subject = CASE_SUBJECTS[i % len(CASE_SUBJECTS)]
+        status, listing = call("GET", f"/cases?customerId={customer['id']}&size=200")
+        existing = {c.get("subject") for c in items(listing)} if status == 200 else set()
         if subject in existing:
             summary["cases_existing"] += 1
             continue
         account_ids = accounts_by_customer.get(customer["id"], [])
         if not account_ids:
-            summary["failures"].append(f"case {subject}: customer {customer['email']} has no account")
+            summary["failures"].append(f"case '{subject}': customer {customer['email']} has no account")
             continue
         body = {
             "subject": subject,
-            "description": f"Synthetic case {number:02d} for {customer['firstName']} {customer['lastName']}. "
-                           "Created by the seeder for demonstration only.",
+            "description": f"{subject} raised by the customer. Awaiting review by the operations team.",
             "priority": CASE_PRIORITIES[i % len(CASE_PRIORITIES)],
             "caseType": "GENERAL_INQUIRY",
             "customerId": customer["id"],
             "accountId": account_ids[0],
-            "owner": "Seed Analyst",
+            "owner": "Operations Team",
         }
         status, created = call("POST", "/cases", body)
         if status == 201:
             summary["cases_created"] += 1
         else:
-            summary["failures"].append(f"case {subject}: {status} {created}")
+            summary["failures"].append(f"case '{subject}': {status} {created}")
 
 
 # --------------------------------------------------------------------------- checks
@@ -427,9 +410,9 @@ def main() -> int:
         "kafka_rows_seen": 0, "cases_created": 0, "cases_existing": 0, "failures": [],
     }
 
-    print(f"seed: ensuring {CUSTOMER_COUNT} synthetic customers", flush=True)
+    print(f"seed: ensuring {CUSTOMER_COUNT} customers", flush=True)
     customers = ensure_customers(summary)
-    print(f"seed: {len(customers)} synthetic customers present", flush=True)
+    print(f"seed: {len(customers)} customers present", flush=True)
 
     accounts_by_customer = {}
     customer_accounts = {}
@@ -467,7 +450,7 @@ def main() -> int:
             summary["imported_rows_already_present"] += result["duplicates"]
             summary["failures"].extend(result["failures"])
 
-    print("seed: creating demonstration cases", flush=True)
+    print("seed: creating customer cases", flush=True)
     seed_cases(customers, accounts_by_customer, summary)
 
     if customers:
@@ -486,7 +469,7 @@ def main() -> int:
     if summary["imports"] == 0:
         problems.append("no aggregation imports completed")
     if summary["cases_created"] + summary["cases_existing"] < CASE_COUNT:
-        problems.append(f"only {summary['cases_created'] + summary['cases_existing']} of {CASE_COUNT} seeded cases exist")
+        problems.append(f"only {summary['cases_created'] + summary['cases_existing']} of {CASE_COUNT} cases exist")
     if summary["kafka_rows_seen"] == 0 and summary["failures"] == []:
         problems.append("the Kafka path into aggregation-service was not confirmed")
 

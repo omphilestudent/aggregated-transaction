@@ -73,4 +73,9 @@ jobs:
         run: docker compose logs --no-color --tail 300
       - name: Tear down
         if: always()
-        run: docker compose down -v
+        run: |
+          # .env is git-ignored, so it does not exist when an earlier step failed before it was created.
+          # Compose needs its required variables to parse the file, so fall back to the template.
+          ENV_FILE=.env
+          [ -f .env ] || ENV_FILE=.env.example
+          docker compose --env-file "$ENV_FILE" down -v --remove-orphans
