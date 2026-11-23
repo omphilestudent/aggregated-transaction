@@ -50,10 +50,11 @@ for pem in "$@"; do
 done
 
 # The JDK's default bundle uses the password "changeit". The Dockerfiles default to the same.
-docker run --rm -v "$WORK:/work" eclipse-temurin:21-jre-alpine sh -c '
+# Run as the invoking user, so the files written into $WORK belong to that user (not root). That keeps
+# the host-side copy and chmod working on CI runners and on Docker Desktop.
+docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$WORK:/work" eclipse-temurin:21-jre-alpine sh -c '
   set -eu
   cp "$JAVA_HOME/lib/security/cacerts" /work/truststore.jks
-  chmod 600 /work/truststore.jks
   for pem in /work/corp-ca-*.pem; do
     [ -f "$pem" ] || continue
     alias="$(basename "$pem" .pem)"
@@ -64,10 +65,7 @@ docker run --rm -v "$WORK:/work" eclipse-temurin:21-jre-alpine sh -c '
 '
 
 mkdir -p "$OUT_DIR"
-# Copy rather than move: the file was written by root inside the container, and only a copy made by
-# this user is owned by this user, so the chmod below works on CI runners and Docker Desktop alike.
-rm -f "$OUT_ABS"
-cp "$WORK/truststore.jks" "$OUT_ABS"
+mv "$WORK/truststore.jks" "$OUT_ABS"
 chmod 600 "$OUT_ABS"
 
 echo "Truststore written: $OUT_ABS"

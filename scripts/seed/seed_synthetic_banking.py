@@ -60,7 +60,9 @@ CASE_PRIORITIES = ["LOW", "MEDIUM", "HIGH", "CRITICAL"]
 IMPORT_COUNT = 60
 IMPORT_WINDOW_DAYS = 90
 SOURCES = ["BANK_FEED", "CARD_NETWORK", "OPEN_BANKING"]
-WORKERS = 6
+# One worker: every service has a 5-connection database pool. Parallel seeding exhausted those pools
+# (HikariPool timeouts, HTTP 500/503), and a failed lookup was then mistaken for "nothing exists".
+WORKERS = 1
 EMAIL_DOMAIN = "example.com"
 CURRENCY = "ZAR"
 
@@ -129,6 +131,15 @@ def call(method, path, body=None, token=None):
             attempt += 1
             time.sleep(1 + attempt)
     raise SeedError(f"{method} {path} unreachable: {last_error}")
+
+
+def must_get(path, token=None):
+    """GET that must succeed. A failed read must never be treated as "nothing exists": that is how
+    the seeder used to create duplicate accounts and transactions. Raises SeedError instead."""
+    status, body = call("GET", path, token=token)
+    if status != 200:
+        raise SeedError(f"GET {path} returned {status}: {body}")
+    return body
 
 
 def items(payload):
@@ -225,8 +236,7 @@ def ensure_customers(summary):
 
 
 def ensure_accounts(index: int, customer: dict, summary) -> list:
-    status, accounts = call("GET", f"/accounts/customer/{customer['id']}")
-    accounts = items(accounts) if status == 200 else []
+    accounts = items(must_get(f"/accounts/customer/{customer['id']}"))
     have = {a.get("accountType") for a in accounts}
     wanted = ["SAVINGS"] + (["CHEQUE"] if index % 3 != 0 else [])
     for account_type in wanted:
@@ -249,18 +259,22 @@ def seed_customer(index: int, customer: dict, now: datetime) -> dict:
     local = {"accounts_created": 0, "transactions_created": 0, "transactions_existing": 0,
              "funding_created": 0, "posted": 0, "failures": [], "accounts": []}
     code = f"C{index:03d}"
-    accounts = ensure_accounts(index, customer, local)
+    try:
+        accounts = ensure_accounts(index, customer, local)
+    except SeedError as error:
+        local["failures"].append(f"{code} accounts: {error}")
+        return local
     local["accounts"] = [a["id"] for a in accounts]
     if not accounts:
         return local
     plan = plan_transactions(code, now, len(accounts))
 
     for ai, account in enumerate(accounts):
-        status, txns = call("GET", f"/transactions/account/{account['id']}")
-        if status != 200:
-            local["failures"].append(f"list transactions for {account['id']}: {status}")
+        try:
+            existing = len(items(must_get(f"/transactions/account/{account['id']}")))
+        except SeedError as error:
+            local["failures"].append(f"{code}-A{ai}: {error}")
             continue
-        existing = len(items(txns))
         if existing == 0:
             rng = random.Random(f"open-{code}-{ai}")
             status, body = call("POST", "/transactions/funding", {
@@ -331,8 +345,11 @@ def seed_cases(customers, accounts_by_customer, summary):
     so re-runs add nothing that already exists."""
     for i, customer in enumerate(customers[:CASE_COUNT]):
         subject = CASE_SUBJECTS[i % len(CASE_SUBJECTS)]
-        status, listing = call("GET", f"/cases?customerId={customer['id']}&size=200")
-        existing = {c.get("subject") for c in items(listing)} if status == 200 else set()
+        try:
+            existing = {c.get("subject") for c in items(must_get(f"/cases?customerId={customer['id']}&size=200"))}
+        except SeedError as error:
+            summary["failures"].append(f"case '{subject}': {error}")
+            continue
         if subject in existing:
             summary["cases_existing"] += 1
             continue
