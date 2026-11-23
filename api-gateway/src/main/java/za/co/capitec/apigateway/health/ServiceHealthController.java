@@ -30,6 +30,7 @@ public class ServiceHealthController {
             @Value("${customer.service.url}") String customerServiceUrl,
             @Value("${account.service.url}") String accountServiceUrl,
             @Value("${transaction.service.url}") String transactionServiceUrl,
+            @Value("${case.service.url}") String caseServiceUrl,
             @Value("${aggregation.service.url}") String aggregationServiceUrl) {
 
         SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
@@ -40,6 +41,7 @@ public class ServiceHealthController {
         services.put("customer-service", customerServiceUrl);
         services.put("account-service", accountServiceUrl);
         services.put("transaction-service", transactionServiceUrl);
+        services.put("case-service", caseServiceUrl);
         services.put("aggregation-service", aggregationServiceUrl);
     }
 

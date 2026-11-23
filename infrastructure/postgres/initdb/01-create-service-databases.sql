@@ -5,6 +5,7 @@
 -- Run by: docker compose service "db-init" (psql -f).
 
 SELECT 'CREATE DATABASE customer_service_db' WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = 'customer_service_db') \gexec
+SELECT 'CREATE DATABASE case_service_db' WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = 'case_service_db') \gexec
 SELECT 'CREATE DATABASE account_service_db' WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = 'account_service_db') \gexec
 SELECT 'CREATE DATABASE transaction_service_db' WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = 'transaction_service_db') \gexec
 SELECT 'CREATE DATABASE transaction_aggregation_db' WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = 'transaction_aggregation_db') \gexec

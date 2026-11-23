@@ -17,6 +17,7 @@ A focused **full-stack financial transaction aggregation** project built with **
 | `api-gateway` | Single entry point for APIs and a **demo-only** JWT session endpoint |
 | `frontend` | React dashboard for customer/account setup, mock imports, summaries, category analysis, trends, filtering and pagination |
 | `postgres`, `kafka`, `db-init` | Persistent databases, Apache Kafka KRaft broker and idempotent database initialization |
+| `seeder` | One-shot loader for synthetic customers, accounts, ledger transactions and aggregation imports (`scripts/seed`, through the gateway) |
 
 Fraud detection, fraud cases, statement generation, notifications and unrelated backend applications have been removed. **Kafka remains**: transaction events are ingested asynchronously; the aggregation service also uses its own transactional outbox for publishing events.
 
@@ -42,6 +43,16 @@ Each Java service owns its Flyway migrations and database. The aggregator valida
 - Optional for local development: Java 21, Maven 3.9+, Node.js 22+
 
 No running database, Kafka broker or JDK is needed on the host when using Docker.
+
+### Synthetic data (seeder)
+
+`docker compose up` ends with the `seeder` container, which runs `scripts/seed/seed_synthetic_banking.py` (Python standard library only). It creates `SEED_CUSTOMER_COUNT` customers (default 60), their savings and cheque accounts, opening balances, about 110 ledger transactions per customer, and one aggregation import per account made with the customer's own session token. It then checks that every balance is readable, that the summaries are non-zero, and that ledger events arrive in aggregation through Kafka. A failed check makes `up --wait` fail. Re-running is safe: existing records are skipped.
+
+To load it again on a running stack:
+
+```bash
+docker compose run --rm seeder
+```
 
 ## Build and run (Docker)
 
@@ -189,4 +200,4 @@ docker compose exec kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server loca
 - Specify **Java / JavaScript / SQL** and **Full Stack**.
 - Explain architectural trade-offs (independent source adapters, deduplication, asynchronous Kafka events, scoped access and data consistency) at the interview.
 
-> **Verification status:** The code was refactored from the supplied archive; this environment does not provide Docker or Maven, so a complete container startup and Java test run were **not executed here**. Run the listed checks before submission.
+> **Verification status:** see the run log for the most recent `scripts/dev/bootstrap.sh` and `scripts/dev/smoke-test.sh` results. Run the listed checks again before submission.

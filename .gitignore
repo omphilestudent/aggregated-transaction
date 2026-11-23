@@ -7,9 +7,9 @@
 **/node_modules/
 **/dist/
 
-# Environment variables
+# Environment variables and secrets (.env.example is the only tracked template)
 .env
-.env.example
+.env.*
 !.env.example
 
 # IDE
@@ -23,8 +23,7 @@
 # Temporary files
 *.tmp
 
-# Local-only Docker setup: truststore, database backups and anything that could hold real data.
-# Never commit these. Backups contain database dumps and statement archives.
+# Local-only Docker setup: Java truststores, keystores and database dumps. Never commit these.
 .local/
 backups/
 *.jks
@@ -32,6 +31,3 @@ backups/
 *.keystore
 *.pgdump
 *.dump
-*.pdf
-private-statements/
-statement-storage/

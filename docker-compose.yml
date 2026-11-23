@@ -1,5 +1,5 @@
 # Transaction Aggregation API — local infrastructure and services.
-# Copy .env.example to .env, configure secrets, and run docker compose up --build -d.
+# Setup and run instructions: see README.md. Every service image is built from the root Dockerfile.
 name: transaction-aggregation-api
 
 x-service-defaults: &service-defaults
@@ -110,7 +110,9 @@ services:
   customer-service:
     <<: *service-defaults
     build:
-      context: customer-service
+      context: .
+      target: customer-service
+      secrets: [truststore]
     image: capitec/customer-service:${IMAGE_TAG:-local}
     mem_limit: 640m
     stop_grace_period: 30s
@@ -138,7 +140,9 @@ services:
   account-service:
     <<: *service-defaults
     build:
-      context: account-service
+      context: .
+      target: account-service
+      secrets: [truststore]
     image: capitec/account-service:${IMAGE_TAG:-local}
     mem_limit: 640m
     stop_grace_period: 30s
@@ -170,7 +174,9 @@ services:
   transaction-service:
     <<: *service-defaults
     build:
-      context: transaction-service
+      context: .
+      target: transaction-service
+      secrets: [truststore]
     image: capitec/transaction-service:${IMAGE_TAG:-local}
     mem_limit: 640m
     stop_grace_period: 30s
@@ -198,10 +204,42 @@ services:
       account-service:
         condition: service_healthy
 
+  case-service:
+    <<: *service-defaults
+    build:
+      context: .
+      target: case-service
+      secrets: [truststore]
+    image: capitec/case-service:${IMAGE_TAG:-local}
+    mem_limit: 640m
+    stop_grace_period: 30s
+    environment:
+      DB_URL: "jdbc:postgresql://postgres:5432/case_service_db"
+      DB_USERNAME: "${POSTGRES_USER:-app_user}"
+      DB_PASSWORD: "${DB_PASSWORD:?Set DB_PASSWORD in .env (same value as POSTGRES_PASSWORD)}"
+      KAFKA_BOOTSTRAP_SERVERS: "kafka:19092"
+      JAVA_OPTS: "-XX:MaxRAMPercentage=60 -XX:+UseSerialGC -XX:TieredStopAtLevel=1 -XX:+ExitOnOutOfMemoryError"
+      SERVER_SHUTDOWN: "graceful"
+      SPRING_LIFECYCLE_TIMEOUT_PER_SHUTDOWN_PHASE: "20s"
+      SPRING_JPA_SHOW_SQL: "false"
+      SPRING_DATASOURCE_HIKARI_MAXIMUM_POOL_SIZE: "5"
+      SPRING_DATASOURCE_HIKARI_MINIMUM_IDLE: "1"
+    ports:
+      - "${CASE_SERVICE_HOST_PORT:-8084}:8084"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      db-init:
+        condition: service_completed_successfully
+      kafka:
+        condition: service_healthy
+
   aggregation-service:
     <<: *service-defaults
     build:
-      context: aggregation-service
+      context: .
+      target: aggregation-service
+      secrets: [truststore]
     image: capitec/aggregation-service:${IMAGE_TAG:-local}
     mem_limit: 640m
     stop_grace_period: 30s
@@ -234,7 +272,9 @@ services:
   api-gateway:
     <<: *service-defaults
     build:
-      context: api-gateway
+      context: .
+      target: api-gateway
+      secrets: [truststore]
     image: capitec/api-gateway:${IMAGE_TAG:-local}
     mem_limit: 640m
     stop_grace_period: 30s
@@ -250,6 +290,7 @@ services:
       CUSTOMER_SERVICE_URL: "http://customer-service:8081"
       ACCOUNT_SERVICE_URL: "http://account-service:8082"
       TRANSACTION_SERVICE_URL: "http://transaction-service:8083"
+      CASE_SERVICE_URL: "http://case-service:8084"
       AGGREGATION_SERVICE_URL: "http://aggregation-service:8088"
     ports:
       - "${API_GATEWAY_HOST_PORT:-8000}:8000"
@@ -260,13 +301,16 @@ services:
         condition: service_healthy
       transaction-service:
         condition: service_healthy
+      case-service:
+        condition: service_healthy
       aggregation-service:
         condition: service_healthy
 
   frontend:
     <<: *service-defaults
     build:
-      context: frontend
+      context: .
+      target: frontend
     image: capitec/frontend:${IMAGE_TAG:-local}
     mem_limit: 64m
     ports:
@@ -275,6 +319,33 @@ services:
       api-gateway:
         condition: service_healthy
 
+  # One-shot: loads the synthetic banking data through the API gateway (scripts/seed). Standard
+  # library only, so no image build is needed. Idempotent; runs on every "up" and adds only what is
+  # missing. A failed check makes "up --wait" fail, so seeding problems are not silently ignored.
+  seeder:
+    image: python:3.12-alpine
+    restart: "no"
+    working_dir: /seed
+    command: ["python3", "/seed/seed_synthetic_banking.py"]
+    environment:
+      GATEWAY_URL: "http://api-gateway:8000/api/v1"
+      SEED_CUSTOMER_COUNT: "${SEED_CUSTOMER_COUNT:-60}"
+      SEED_INGEST_WAIT_SECONDS: "${SEED_INGEST_WAIT_SECONDS:-120}"
+    volumes:
+      - ./scripts/seed:/seed:ro
+    depends_on:
+      api-gateway:
+        condition: service_healthy
+      aggregation-service:
+        condition: service_healthy
+
 volumes:
   postgres_data:
   kafka_data:
+
+# Build-time only: a Java trust store used by Maven inside the image builds, needed behind a
+# TLS-intercepting proxy. The file is read by `docker compose build`; it is never copied into an image.
+# Create it with scripts/dev/generate-truststore.sh (see README). Not used at runtime.
+secrets:
+  truststore:
+    file: ${TRUSTSTORE_FILE:-./.local/truststore.jks}

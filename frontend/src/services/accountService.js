@@ -1,4 +1,4 @@
-import api from './api.js'
+import api from './api'
 
 // account-service paths: /api/v1/accounts, /api/v1/accounts/{id},
 // /api/v1/accounts/customer/{customerId}.

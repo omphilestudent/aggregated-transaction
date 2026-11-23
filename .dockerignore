@@ -1,0 +1,30 @@
+# Build context is the repository root. Keep images free of VCS metadata, IDE files, local
+# secrets and truststores, database dumps and build output (Maven and npm run inside the image).
+.git
+.github
+.idea
+.vscode
+*.iml
+**/.DS_Store
+**/*.log
+
+# Build output and dependencies (rebuilt inside the image)
+**/target
+**/node_modules
+**/dist
+
+# Local configuration and secrets. Never ship these in an image.
+.env
+.env.*
+!.env.example
+.local
+backups
+**/*.jks
+**/*.p12
+**/*.keystore
+**/*.pgdump
+**/*.dump
+
+# Not needed inside any image
+README.md
+docker-compose.yml

@@ -25,7 +25,7 @@ public record CurrentUser(String subject, boolean staff, UUID customerId) {
             }
         }
         if (!staff && customerId == null) {
-            throw new AccessDeniedException("Token does not grant access to aggregated transactions");
+            throw new AccessDeniedException("Token does not grant access to aggregation data");
         }
         return new CurrentUser(jwt.getSubject(), staff, customerId);
     }
@@ -36,7 +36,7 @@ public record CurrentUser(String subject, boolean staff, UUID customerId) {
 
     public void requireCustomer(UUID customer) {
         if (!canAccessCustomer(customer)) {
-            throw new AccessDeniedException("You are not authorised to access this customer's aggregated transactions");
+            throw new AccessDeniedException("You are not authorised to access this customer's data");
         }
     }
 }
